@@ -128,7 +128,7 @@ foreach($file in $gamecode_source_files)
     Write-Host "Linking game_code.dll" -ForegroundColor DarkGreen
     lld-link.exe -dll -debug -subsystem:windows -defaultlib:libcmt `
     -libpath:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.18362.0\um\x64" `
-    -libpath:"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.23.28105\lib\x64" `
+    -libpath:"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\lib\x64" `
     -libpath:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.18362.0\ucrt\x64" `
     -libpath:"$output_path" `
     "$output_path\game_code.o" `
@@ -155,7 +155,7 @@ Write-Host "Linking $projname.exe" -ForegroundColor Blue
 lld-link.exe -defaultlib:libcmt -debug `
  -out:"$projname.exe" `
  -libpath:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.18362.0\um\x64" `
- -libpath:"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.23.28105\lib\x64" `
+ -libpath:"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.24.28314\lib\x64" `
  -libpath:"C:\Program Files (x86)\Windows Kits\10\Lib\10.0.18362.0\ucrt\x64"`
   "$output_path\main.o"
 
