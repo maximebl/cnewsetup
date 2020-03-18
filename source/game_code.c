@@ -1,21 +1,28 @@
+#include "cnewsetup.h" 
 #include "imgui_impl_dx12.c"
 #include "imgui_impl_win32.c"
-#include "common.h"
-#include "math.h"
 
 #define DX12_ENABLE_DEBUG_LAYER
 #ifdef DX12_ENABLE_DEBUG_LAYER
 #include <dxgidebug.h>
-#include "WinPixEventRuntime/cwinpix.h"
 #endif
 
-#pragma comment(lib, "cwinpix")
 #pragma comment(lib, "cimgui")
 #pragma comment(lib, "d3d12")
 #pragma comment(lib, "dxgi")
 #pragma comment(lib, "dxguid")
 #pragma comment(lib, "d3dcompiler")
 #pragma comment(lib, "user32")
+
+#define csafe_release(p) \
+  do                    \
+  {                     \
+    if(p)               \
+    {                   \
+      (p)->lpVtbl->Release(p);   \
+      (p) = NULL;       \
+    }                   \
+  } while((void)0, 0)
 
 void failed_assert(const char* file, int line, const char* statement);
 
@@ -72,7 +79,7 @@ static UINT64 hwnd_width;
 static UINT hwnd_height;
 static struct FrameContext g_frameContext[NUM_FRAMES_IN_FLIGHT];
 static UINT g_frameIndex = 0;
-static ID3D12Device* g_pd3dDevice = NULL;
+static ID3D12Device* g_device = NULL;
 static ID3D12DescriptorHeap* g_pd3dRtvDescHeap = NULL;
 static ID3D12DescriptorHeap* g_pd3dSrvDescHeap = NULL;
 static ID3D12DescriptorHeap* dsv_heap = NULL;
@@ -81,6 +88,8 @@ static ID3D12GraphicsCommandList* g_pd3dCommandList = NULL;
 static ID3D12Fence* g_fence = NULL;
 static ID3D12PipelineState* g_pso = NULL; 
 static ID3D12RootSignature* g_rootsig = NULL;
+ID3DBlob* vs_blob = NULL;
+ID3DBlob* ps_blob = NULL;
 
 static DXGI_FORMAT dsv_format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 static ID3D12Resource* dsv_resource;
@@ -91,9 +100,6 @@ static HANDLE g_hSwapChainWaitableObject = NULL;  // Signals when the DXGI Adapt
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS];
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS];
 
-ID3DBlob* vs_blob = NULL;
-ID3DBlob* ps_blob = NULL;
-
 static UINT64* timestamp_buffer = NULL;
 static ID3D12Resource* rb_buffer;
 static ID3D12QueryHeap* query_heap;
@@ -102,34 +108,21 @@ static UINT total_timer_count = 6;
 static UINT ui_timer_count = 6;
 UINT stats_counter = 0;
 void frame_time_statistics(void);
-void print_cache_info(CACHE_RELATIONSHIP cache);
-void print_mask(KAFFINITY mask);
-void get_processor_cache_info();
-#define core_masks_count 2
-#define cache_masks_count 8
-int get_core_mask(KAFFINITY mask);
-int* get_cache_masks(KAFFINITY mask);
-void associate_caches_with_core();
-char* get_cache_type_string(PROCESSOR_CACHE_TYPE type);
-
-struct cache_info
-{
-	CACHE_RELATIONSHIP cache_rel;
-	unsigned int masks[4];
-};
-struct cache_info cache_infos[26];
-
-struct core_info
-{
-	unsigned int core_id;
-	unsigned int mask;
-	struct cache_info cache_infos[4];
-};
-struct core_info core_infos[8];
 
 static bool is_vsync = true;
 
-//Benchmarks
+// benchmarking
+#define microsecond 1000000
+#define millisecond 1000
+extern double g_cpu_frequency;
+extern double g_gpu_frequency;
+static const struct measurement_s {
+	double start_time;
+	double end_time;
+	double elapsed_ms;
+} measurement_default = {.start_time = 0.0, .end_time = 0.0, .elapsed_ms = 0.0};
+typedef struct measurement_s measurement;
+
 double g_cpu_frequency = 0;
 double g_gpu_frequency = 0;
 measurement delta_time;
@@ -145,9 +138,8 @@ typedef void(__stdcall* fixed_GetGPUDescriptorHandleForHeapStart)(
     ID3D12DescriptorHeap* This,
     D3D12_GPU_DESCRIPTOR_HANDLE* pOut);
 
-BOOL APIENTRY DllMain(DWORD ul_reason_for_call);
-__declspec(dllexport) _Bool CreateDeviceD3D();
-__declspec(dllexport) _Bool update_and_render(void);
+__declspec(dllexport) bool CreateDeviceD3D();
+__declspec(dllexport) bool update_and_render(void);
 __declspec(dllexport) void resize(HWND hWnd, int width, int height);
 __declspec(dllexport) void CleanupDeviceD3D(void);
 __declspec(dllexport) void ResizeSwapChain(HWND hWnd, int width, int height);
@@ -170,10 +162,10 @@ ID3D12Resource* create_committed_resource(const D3D12_HEAP_PROPERTIES* heap_prop
 					  const D3D12_RESOURCE_STATES state,
 					  const D3D12_CLEAR_VALUE* clear_value);
 
-ID3D12PipelineState* create_aos_pso(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pso_desc);
+ID3D12PipelineState* create_pso(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pso_desc);
 
-// cube
-void create_aos_cube(ID3D12GraphicsCommandList* cmd_list);
+// triangle
+void create_triangle(ID3D12GraphicsCommandList* cmd_list);
 
 // defaults
 #define set_default(val, def) (((val) == 0) ? (def) : (val))
@@ -184,186 +176,8 @@ D3D12_BLEND_DESC default_blenddesc(D3D12_BLEND_DESC* blend_desc);
 D3D12_RASTERIZER_DESC default_rasterizer_desc(D3D12_RASTERIZER_DESC* rasterizer_desc);
 D3D12_DEPTH_STENCIL_DESC default_depthstencil_desc(D3D12_DEPTH_STENCIL_DESC* depthstencil_desc);
 
-BOOL APIENTRY DllMain(DWORD ul_reason_for_call)
-{
-	switch (ul_reason_for_call) {
-		case DLL_PROCESS_ATTACH:
-			break;
-
-		case DLL_THREAD_ATTACH:
-			break;
-
-		case DLL_THREAD_DETACH:
-			break;
-
-		case DLL_PROCESS_DETACH:
-			break;
-	}
-	return TRUE;
-}
-
-void print_cache_info(CACHE_RELATIONSHIP cache)
-{
-	printf("%s: cache.Associativity=%d\n", __func__, cache.Associativity);
-	printf("%s: cache.CacheSize=%d\n", __func__, cache.CacheSize);
-	printf("%s: cache.Level=%d\n", __func__, cache.Level);
-	printf("%s: cache.LineSize=%d\n", __func__, cache.LineSize);
-	printf("%s: cache.Type=%d\n", __func__, cache.Type);
-	printf("\n");
-}
-
-void print_mask(KAFFINITY mask)
-{
-	printf(" [");
-	for (int i = 0; i < sizeof(mask) * 8; i++) {
-		KAFFINITY shifted_i = (KAFFINITY)1 << i;
-		KAFFINITY masked = mask & shifted_i;
-		if (masked) {
-			printf(" %d", i);
-		}
-	}
-	printf(" ]");
-}
-
-int get_core_mask(KAFFINITY mask)
-{
-	static int masks[core_masks_count] = {0};
-	int size = 0;
-	int result = 0;
-	for (int i = 0; i < sizeof(mask) * 8; i++) {
-		KAFFINITY shifted_i = (KAFFINITY)1 << i;
-		KAFFINITY masked = mask & shifted_i;
-
-		if (masked && size < core_masks_count) {
-			masks[size] = i;
-			size++;
-		}
-	}
-	result = masks[0] + masks[1];
-
-	return result;
-}
-
-int* get_cache_masks(KAFFINITY mask)
-{
-	int masks[cache_masks_count];
-	memset(masks, 0,cache_masks_count * sizeof(int) );
-	static int result[4];
-	memset(result, 0, 4 * sizeof(int) );
-
-	int size = 0;
-	for (int i = 0; i < sizeof(mask) * 8; i++) {
-		KAFFINITY shifted_i = (KAFFINITY)1 << i;
-		KAFFINITY masked = mask & shifted_i;
-
-		if (masked && size < cache_masks_count) {
-			masks[size] = i;
-			size++;
-		}
-	}
-
-	int index = 0;
-	for(int i = 0; i < _countof(masks); i+=2)
-	{
-		result[index++] = masks[i] + masks[i+1];
-	}
-	return result;
-}
-
-void associate_caches_with_core()
-{
-	for(int i = 0; i < _countof(core_infos);++i)
-	{
-		int core_cache_info_index = 0;
-		for(int j = 0; j < _countof(cache_infos); ++j)
-		{
-			for(int k = 0; k < _countof(cache_infos[j].masks); ++k)
-			{
-				if(core_infos[i].mask == cache_infos[j].masks[k] )
-				{
-					core_infos[i].cache_infos[core_cache_info_index++] = cache_infos[j];
-				}
-			}
-		}
-	}
-}
-
-char* get_cache_type_string(PROCESSOR_CACHE_TYPE type)
-{
-	switch(type)
-	{
-		case CacheUnified:
-			return "Unified cache";
-		case CacheInstruction:
-			return "Instruction cache";
-		case CacheData:
-			return "Data cache";
-		case CacheTrace:
-			return "Trace cache";
-	}
-}
-
-void get_processor_cache_info()
-{
-	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = NULL;
-	char *buffer = NULL;
-	char *p;
-	DWORD len = 0;
-
-	GetLogicalProcessorInformationEx(RelationAll, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buffer, &len);
-
-	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-		return -1;
-
-	buffer = malloc(len);
-
-	GetLogicalProcessorInformationEx(RelationAll, (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buffer, &len);
-
-	int core_index = 0;
-	int cache_index = 0;
-
-	for (p = buffer; p < buffer + len; p += info->Size) {
-		info = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)p;
-
-		switch(info->Relationship)
-		{
-			case RelationProcessorCore:
-				struct core_info core_info;
-				/*core_info.mask = get_core_mask(info->Processor.GroupMask[0].Mask);*/
-				int mask = get_core_mask(info->Processor.GroupMask[0].Mask);
-				memcpy(&core_info.mask, &mask, sizeof(int));
-				core_info.core_id = core_index;
-				core_infos[core_index] = core_info;
-				core_index++;
-
-				print_mask(info->Processor.GroupMask[0].Mask);
-				break;
-
-			case RelationCache:
-				print_cache_info(info->Cache);
-				/*print_mask(info->Cache.GroupMask.Mask);*/
-				struct cache_info cache_info;
-
-				cache_info.cache_rel = info->Cache;
-				memcpy(cache_info.masks,
-				       get_cache_masks (info->Cache.GroupMask.Mask),
-				       cache_masks_count * sizeof(int));
-
-				cache_infos[cache_index] = cache_info;
-
-				cache_index++;
-				break;
-		}
-	}
-
-}
-
 __declspec(dllexport) bool initialize(HWND* hwnd)
 {
-	get_processor_cache_info();
-	associate_caches_with_core();
-
-
 	g_hwnd = hwnd;
 	RECT rect;
 	if (GetClientRect(*g_hwnd, &rect)) {
@@ -394,7 +208,7 @@ __declspec(dllexport) bool initialize(HWND* hwnd)
 	fixed_gchfhs(g_pd3dSrvDescHeap, &rtvhandle);
 	fixed_gghfhs(g_pd3dSrvDescHeap, &srvhandle);
 
-	ImGui_ImplDX12_Init(g_pd3dDevice,
+	ImGui_ImplDX12_Init(g_device,
 			    NUM_FRAMES_IN_FLIGHT,
 			    DXGI_FORMAT_R8G8B8A8_UNORM,
 			    g_pd3dSrvDescHeap,
@@ -476,10 +290,10 @@ __declspec(dllexport) bool CreateDeviceD3D()
 	}
 #endif
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
-	if (D3D12CreateDevice(NULL, featureLevel, &IID_ID3D12Device, (void**)&g_pd3dDevice) != S_OK)
+	if (D3D12CreateDevice(NULL, featureLevel, &IID_ID3D12Device, (void**)&g_device) != S_OK)
 		return false;
 
-	g_pd3dDevice->lpVtbl->SetName(g_pd3dDevice,L"main_device");
+	g_device->lpVtbl->SetName(g_device,L"main_device");
 
 	{
 		D3D12_DESCRIPTOR_HEAP_DESC desc;
@@ -488,14 +302,14 @@ __declspec(dllexport) bool CreateDeviceD3D()
 		desc.NumDescriptors = NUM_BACK_BUFFERS;
 		desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
-		if (g_pd3dDevice->lpVtbl->CreateDescriptorHeap(g_pd3dDevice,
+		if (g_device->lpVtbl->CreateDescriptorHeap(g_device,
 							       &desc,
 							       &IID_ID3D12DescriptorHeap,
 							       (void**)&g_pd3dRtvDescHeap) != S_OK)
 			return false;
 
 		g_pd3dRtvDescHeap->lpVtbl->SetName(g_pd3dRtvDescHeap, L"main_rtv_desc_heap");
-		SIZE_T rtvDescriptorSize = g_pd3dDevice->lpVtbl->GetDescriptorHandleIncrementSize( g_pd3dDevice, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+		SIZE_T rtvDescriptorSize = g_device->lpVtbl->GetDescriptorHandleIncrementSize( g_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
 		fixed_GetCPUDescriptorHandleForHeapStart fixed_gchfhs =
 		    (fixed_GetCPUDescriptorHandleForHeapStart)
@@ -516,7 +330,7 @@ __declspec(dllexport) bool CreateDeviceD3D()
 		desc.NodeMask = 1;
 		desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
-		g_pd3dDevice->lpVtbl->CreateDescriptorHeap(g_pd3dDevice,
+		g_device->lpVtbl->CreateDescriptorHeap(g_device,
 							   &desc,
 							   &IID_ID3D12DescriptorHeap,
 							   (void**)&g_pd3dSrvDescHeap);
@@ -524,8 +338,8 @@ __declspec(dllexport) bool CreateDeviceD3D()
 	}
 
 	{
-		g_pd3dDevice->lpVtbl->CreateDescriptorHeap(
-		    g_pd3dDevice,
+		g_device->lpVtbl->CreateDescriptorHeap(
+		    g_device,
 		    &(D3D12_DESCRIPTOR_HEAP_DESC){.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
 						  .NumDescriptors = 1,
 						  .NodeMask = 1,
@@ -541,7 +355,7 @@ __declspec(dllexport) bool CreateDeviceD3D()
 		desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 		desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 		desc.NodeMask = 1;
-		if (g_pd3dDevice->lpVtbl->CreateCommandQueue(g_pd3dDevice,
+		if (g_device->lpVtbl->CreateCommandQueue(g_device,
 							     &desc,
 							     &IID_ID3D12CommandQueue,
 							     (void**)&g_pd3dCommandQueue) != S_OK)
@@ -550,14 +364,14 @@ __declspec(dllexport) bool CreateDeviceD3D()
 	}
 
 	for (UINT i = 0; i < NUM_FRAMES_IN_FLIGHT; i++)
-		if (g_pd3dDevice->lpVtbl->CreateCommandAllocator(
-			g_pd3dDevice,
+		if (g_device->lpVtbl->CreateCommandAllocator(
+			g_device,
 			D3D12_COMMAND_LIST_TYPE_DIRECT,
 			&IID_ID3D12CommandAllocator,
 			(void**)&g_frameContext[i].CommandAllocator) != S_OK)
 			return false;
 
-	if (g_pd3dDevice->lpVtbl->CreateCommandList(g_pd3dDevice,
+	if (g_device->lpVtbl->CreateCommandList(g_device,
 						    0,
 						    D3D12_COMMAND_LIST_TYPE_DIRECT,
 						    g_frameContext[0].CommandAllocator,
@@ -569,7 +383,7 @@ __declspec(dllexport) bool CreateDeviceD3D()
 
 	g_pd3dCommandList->lpVtbl->SetName(g_pd3dCommandList, L"main_cmd_list");
 
-	if (g_pd3dDevice->lpVtbl->CreateFence(g_pd3dDevice,
+	if (g_device->lpVtbl->CreateFence(g_device,
 					      0,
 					      D3D12_FENCE_FLAG_NONE,
 					      &IID_ID3D12Fence,
@@ -637,8 +451,8 @@ __declspec(dllexport) void create_dsv(UINT64 width, UINT height)
 	    D3D12_RESOURCE_STATE_DEPTH_WRITE,
 	    &optimized_clear_value);
 
-	g_pd3dDevice->lpVtbl->CreateDepthStencilView(
-	    g_pd3dDevice,
+	g_device->lpVtbl->CreateDepthStencilView(
+	    g_device,
 	    dsv_resource,
 	    &(D3D12_DEPTH_STENCIL_VIEW_DESC){.Flags = D3D12_DSV_FLAG_NONE,
 					     .Format = dsv_format,
@@ -655,7 +469,7 @@ __declspec(dllexport) void CreateRenderTarget()
 						i,
 						&IID_ID3D12Resource,
 						(void**)&pBackBuffer);
-		g_pd3dDevice->lpVtbl->CreateRenderTargetView(g_pd3dDevice,
+		g_device->lpVtbl->CreateRenderTargetView(g_device,
 							     pBackBuffer,
 							     NULL,
 							     g_mainRenderTargetDescriptor[i]);
@@ -683,7 +497,6 @@ void cpu_wait(UINT64 fence_value)
 
 	g_fence->lpVtbl->SetEventOnCompletion(g_fence, fence_value, g_fenceEvent);
 	WaitForSingleObject(g_fenceEvent, INFINITE);
-	/*cPIXNotifyWakeFromFenceSignal(g_fenceEvent);  // The event was successfully signaled, so notify PIX*/
 }
 
 ID3D12Resource* create_committed_resource(const D3D12_HEAP_PROPERTIES* heap_props,
@@ -696,7 +509,7 @@ ID3D12Resource* create_committed_resource(const D3D12_HEAP_PROPERTIES* heap_prop
 	D3D12_RESOURCE_DESC tmp_resource_desc = default_resource_desc(resource_desc);
 	D3D12_HEAP_PROPERTIES tmp_heap_props = default_heap_props(heap_props);
 
-	HRESULT hr = g_pd3dDevice->lpVtbl->CreateCommittedResource(g_pd3dDevice,
+	HRESULT hr = g_device->lpVtbl->CreateCommittedResource(g_device,
 						      &tmp_heap_props,
 						      flags,
 						      &tmp_resource_desc,
@@ -708,73 +521,46 @@ ID3D12Resource* create_committed_resource(const D3D12_HEAP_PROPERTIES* heap_prop
 	return resource;
 }
 
-ID3D12PipelineState* create_aos_pso(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pso_desc)
+ID3D12PipelineState* create_pso(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pso_desc)
 {
 	ID3D12PipelineState* pso = NULL;
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC tmp_pso_desc = default_pso_desc(pso_desc);
-	HRESULT hr = g_pd3dDevice->lpVtbl->CreateGraphicsPipelineState(g_pd3dDevice, &tmp_pso_desc, &IID_ID3D12PipelineState, (void**)&pso);
+	HRESULT hr = g_device->lpVtbl->CreateGraphicsPipelineState(g_device, &tmp_pso_desc, &IID_ID3D12PipelineState, (void**)&pso);
 	ASSERT(SUCCEEDED(hr));
 	return pso;
 }
 
-#define cube_vertices_count 3
-#define cube_indices_count 36
+#define triangle_vertices_count 3
 #define no_offset 0
 #define first_subresource 0
-// TODO: try __m256?
-struct position_color_simd
-{
-	__m128 position;
-	__m128 color;
-};
-
 struct position_color
 {
 	float position[4];
 	float color[4];
 };
 
-struct position_color cube_vertices[cube_vertices_count];
-
 struct mesh
 {
 	ID3D12Resource* vertex_default_resource;
 	ID3D12Resource* vertex_upload_resource;
-	ID3D12Resource* indices_default_resource;
-	ID3D12Resource* indices_upload_resource;
 	D3D12_VERTEX_BUFFER_VIEW vbv;
-	D3D12_INDEX_BUFFER_VIEW ibv;
 };
 
-struct mesh aos_cube;
+struct mesh triangle;
 
-void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
+void create_triangle(ID3D12GraphicsCommandList* cmd_list)
 {
-
-	// upload vertex buffer to the GPU
-	/*struct position_color vertices[cube_vertices_count] = */
-	/*{*/
-		 /*{ .position ={ -1.0f , -1.f, -1.f, 1.f} ,.color = {0.0f , 0.0f, 0.0f, 1.f}} ,*/
-		 /*{ .position ={ -1.f , 1.f , -1.f, 1.f} ,.color = {0.0f , 1.0f, 0.0f, 1.f}} ,*/
-		 /*{ .position ={  1.f , 1.f , -1.f, 1.f} ,.color = {1.0f , 1.0f, 0.0f, 1.f}} ,*/
-		 /*{ .position ={  1.f , -1.f, -1.f, 1.f} ,.color = {1.0f , 0.0f, 0.0f, 1.f}} ,*/
-		 /*{ .position ={ -1.f , -1.f,  1.f, 1.f} ,.color = {0.0f , 0.0f, 1.0f, 1.f}} ,*/
-		 /*{ .position ={ -1.f , 1.f ,  1.f, 1.f} ,.color = {0.0f , 1.0f, 1.0f, 1.f}} ,*/
-		 /*{ .position ={  1.f , 1.f ,  1.f, 1.f} ,.color = {1.0f , 1.0f, 1.0f, 1.f}} ,*/
-		 /*{ .position ={  1.f , -1.f,  1.f, 1.f} ,.color = {1.0f , 0.0f, 1.0f, 1.f}}*/
-	/*};*/
-
-	struct position_color vertices[cube_vertices_count] = 
+	struct position_color vertices[triangle_vertices_count] = 
 	{
 		 { .position ={ 0.0f , 0.25f, 0.0f, 1.0f} ,.color = {1.0f , 0.0f, 0.0f, 1.0f}} ,
 		 { .position ={ 0.25f , -0.25f , 0.0f, 1.0f} ,.color = {0.0f , 1.0f, 0.0f, 1.0f}} ,
 		 { .position ={  -0.25f , -0.25f , 0.0f, 1.0f} ,.color = {0.0f , 0.0f, 1.0f, 1.f}} ,
 	};
 
-	size_t cube_vertices_stride = sizeof(struct position_color);
-	size_t vertex_buffer_byte_size = cube_vertices_stride * _countof(vertices);
+	size_t stride = sizeof(struct position_color);
+	size_t vertex_buffer_byte_size = stride * _countof(vertices);
 
-	aos_cube.vertex_default_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
+	triangle.vertex_default_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
 			                                           {
 									.Type = D3D12_HEAP_TYPE_DEFAULT
 							           },
@@ -787,9 +573,9 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
                                                                    D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
 							           D3D12_RESOURCE_STATE_COPY_DEST,
 								   NULL);
-	aos_cube.vertex_default_resource->lpVtbl->SetName(aos_cube.vertex_default_resource, L"vertex_default_resource");
+	triangle.vertex_default_resource->lpVtbl->SetName(triangle.vertex_default_resource, L"vertex_default_resource");
 
-	aos_cube.vertex_upload_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
+	triangle.vertex_upload_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
 			                                           {
 								        .Type = D3D12_HEAP_TYPE_UPLOAD
 							           },
@@ -802,10 +588,10 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
                                                                    D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
 							           D3D12_RESOURCE_STATE_GENERIC_READ,
 								   NULL);
-	aos_cube.vertex_upload_resource->lpVtbl->SetName(aos_cube.vertex_upload_resource, L"vertex_upload_resource");
+	triangle.vertex_upload_resource->lpVtbl->SetName(triangle.vertex_upload_resource, L"vertex_upload_resource");
 
 	BYTE* mapped_vertex_data = NULL;
-	aos_cube.vertex_upload_resource->lpVtbl->Map(aos_cube.vertex_upload_resource,
+	triangle.vertex_upload_resource->lpVtbl->Map(triangle.vertex_upload_resource,
 						 first_subresource,
 						 &(D3D12_RANGE){.Begin = 0, .End = 0},
 						 (void**)&mapped_vertex_data);
@@ -814,84 +600,18 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 	       (void*)vertices, 
 	       vertex_buffer_byte_size);
 
-	aos_cube.vertex_upload_resource->lpVtbl->Unmap(aos_cube.vertex_upload_resource,
+	triangle.vertex_upload_resource->lpVtbl->Unmap(triangle.vertex_upload_resource,
 						   first_subresource,
 						   &(D3D12_RANGE){.Begin = 0, .End = 0});
 
 	cmd_list->lpVtbl->CopyBufferRegion(cmd_list,
-					   aos_cube.vertex_default_resource, no_offset,
-					   aos_cube.vertex_upload_resource , no_offset,
+					   triangle.vertex_default_resource, no_offset,
+					   triangle.vertex_upload_resource , no_offset,
 					   vertex_buffer_byte_size);
 
-	aos_cube.vbv.BufferLocation = aos_cube.vertex_default_resource->lpVtbl->GetGPUVirtualAddress(aos_cube.vertex_default_resource);
-	aos_cube.vbv.SizeInBytes = vertex_buffer_byte_size;
-	aos_cube.vbv.StrideInBytes = cube_vertices_stride;
-
-	// index buffer
-	unsigned short cube_indices[cube_indices_count] =	
-	{
-		0, 1, 2, 0, 2, 3,
-		4, 6, 5, 4, 7, 6,
-		4, 5, 1, 4, 1, 0,
-		3, 2, 6, 3, 6, 7,
-		1, 5, 6, 1, 6, 2,
-		4, 0, 3, 4, 3, 7
-	};
-
-	size_t cube_indices_stride = sizeof(unsigned short);
-	size_t index_buffer_byte_size = cube_indices_stride * _countof(cube_indices);
-
-	aos_cube.indices_default_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
-			                                           {
-									.Type = D3D12_HEAP_TYPE_DEFAULT
-							           },
-							           &(D3D12_RESOURCE_DESC)
-								   {
-									.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-								        .Width = index_buffer_byte_size,
-									.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
-								   },
-                                                                   D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
-							           D3D12_RESOURCE_STATE_COPY_DEST,
-								   NULL);
-	aos_cube.indices_default_resource->lpVtbl->SetName(aos_cube.indices_default_resource, L"indices_default_resource");
-
-	aos_cube.indices_upload_resource = create_committed_resource(&(D3D12_HEAP_PROPERTIES)
-			                                           {
-								        .Type = D3D12_HEAP_TYPE_UPLOAD
-							           },
-							           &(D3D12_RESOURCE_DESC)
-								   {
-									.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-								        .Width = index_buffer_byte_size,
-									.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
-								   },
-                                                                   D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
-							           D3D12_RESOURCE_STATE_GENERIC_READ,
-								   NULL);
-	aos_cube.indices_upload_resource->lpVtbl->SetName(aos_cube.indices_upload_resource, L"indices_upload_resource");
-
-	BYTE* mapped_index_data = NULL;
-	aos_cube.indices_upload_resource->lpVtbl->Map(aos_cube.indices_upload_resource,
-						 first_subresource,
-						 &(D3D12_RANGE){.Begin = 0, .End = 0},
-						 (void**)&mapped_index_data);
-
-	memcpy((void*)mapped_index_data, (void*)cube_indices, sizeof(unsigned short) * cube_indices_count);
-
-	aos_cube.indices_upload_resource->lpVtbl->Unmap(aos_cube.indices_upload_resource,
-						   first_subresource,
-						   &(D3D12_RANGE){.Begin = 0, .End = 0});
-
-	cmd_list->lpVtbl->CopyBufferRegion(cmd_list,
-					   aos_cube.indices_default_resource, no_offset,
-					   aos_cube.indices_upload_resource , no_offset,
-					   index_buffer_byte_size);
-
-
-	aos_cube.ibv.BufferLocation = aos_cube.indices_default_resource->lpVtbl->GetGPUVirtualAddress(aos_cube.indices_default_resource);
-	aos_cube.ibv.SizeInBytes = index_buffer_byte_size;
-	aos_cube.ibv.Format = DXGI_FORMAT_R16_UINT;
+	triangle.vbv.BufferLocation = triangle.vertex_default_resource->lpVtbl->GetGPUVirtualAddress(triangle.vertex_default_resource);
+	triangle.vbv.SizeInBytes = vertex_buffer_byte_size;
+	triangle.vbv.StrideInBytes = stride;
 
 	// resource transitions
 	cmd_list->lpVtbl->ResourceBarrier(cmd_list, 1, &(D3D12_RESOURCE_BARRIER)
@@ -900,20 +620,7 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 							.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE, 
 							.Transition = 
 							{
-								.pResource = aos_cube.vertex_default_resource, 
-								.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 
-								.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST, 
-								.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ
-							} 
-						   });
-
-	cmd_list->lpVtbl->ResourceBarrier(cmd_list, 1, &(D3D12_RESOURCE_BARRIER)
-						   {
-							.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, 
-							.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE, 
-							.Transition = 
-							{
-								.pResource = aos_cube.indices_default_resource, 
+								.pResource = triangle.vertex_default_resource, 
 								.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, 
 								.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST, 
 								.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ
@@ -921,7 +628,15 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 						   });
 
 	// shaders compilation
-	wchar_t* default_shader = L"C:\\Users\\maxim\\source\\repos\\cnewsetup\\source\\shaders\\default_shader.hlsl";
+
+	wchar_t* default_shader = L"..\\..\\source\\default_shader.hlsl";
+
+	WIN32_FIND_DATAW found_file;
+	if (FindFirstFileW(default_shader, &found_file) == INVALID_HANDLE_VALUE) {
+		if (MessageBoxW(NULL, L"Required shader file not found.\n\nMake sure default_shaders.hlsl is in the cnewsetup\\source folder.", L"Could not find required shader.",
+				MB_OK | MB_ICONERROR | MB_DEFBUTTON2) != IDYES) {
+		}
+	}
 
 	HRESULT hr = NULL; 
 	ID3DBlob* error_blob = NULL;
@@ -964,7 +679,8 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 
 	D3D12_FEATURE_DATA_ROOT_SIGNATURE feature_data = {};
 	feature_data.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
-	HRESULT fs_gr = g_pd3dDevice->lpVtbl->CheckFeatureSupport(g_pd3dDevice, D3D12_FEATURE_ROOT_SIGNATURE, (void*)&feature_data, sizeof(feature_data) );
+	hr = g_device->lpVtbl->CheckFeatureSupport(g_device, D3D12_FEATURE_ROOT_SIGNATURE, (void*)&feature_data, sizeof(feature_data) );
+	ASSERT(SUCCEEDED(hr));
 
 	hr = D3D12SerializeVersionedRootSignature(&(D3D12_VERSIONED_ROOT_SIGNATURE_DESC) {
 				.Version = D3D_ROOT_SIGNATURE_VERSION_1_1, 
@@ -995,7 +711,7 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 		OutputDebugString(error_msg);
 	}
 
-	hr = g_pd3dDevice->lpVtbl->CreateRootSignature(g_pd3dDevice,
+	hr = g_device->lpVtbl->CreateRootSignature(g_device,
 						  1,
 						  rs_blob->lpVtbl->GetBufferPointer(rs_blob),
 						  rs_blob->lpVtbl->GetBufferSize(rs_blob),
@@ -1004,7 +720,7 @@ void create_aos_cube(ID3D12GraphicsCommandList* cmd_list)
 
 	ASSERT(SUCCEEDED(hr));
 
-	g_pso = create_aos_pso(&(D3D12_GRAPHICS_PIPELINE_STATE_DESC) {
+	g_pso = create_pso(&(D3D12_GRAPHICS_PIPELINE_STATE_DESC) {
 				.pRootSignature = g_rootsig,
 				.VS = {.pShaderBytecode = vs_blob->lpVtbl->GetBufferPointer(vs_blob), .BytecodeLength = vs_blob->lpVtbl->GetBufferSize(vs_blob)},
 				.PS = {.pShaderBytecode = ps_blob->lpVtbl->GetBufferPointer(ps_blob), .BytecodeLength = ps_blob->lpVtbl->GetBufferSize(ps_blob)},
@@ -1156,24 +872,23 @@ void WaitForLastSubmittedFrame()
 	frameCtxt->FenceValue = 0;
 	if (g_fence->lpVtbl->GetCompletedValue(g_fence) >= fenceValue) return;
 
-	g_fence->lpVtbl->SetEventOnCompletion(g_fence, fenceValue, g_fenceEvent);
+	// The commented PIX code here shows how you would use WinPIXEventRuntime to display sync events
 
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(0, 0, 0), "WaitForLastSubmittedFrame");*/
+	/*PIXBeginEvent_gpu(g_pd3dCommandQueue, PIX_COLOR(0, 0, 0), "WaitForLastSubmittedFrame");*/
 	DWORD wait_result = WaitForSingleObject(g_fenceEvent, INFINITE);
-	/*cPIXEndEvent_gpu(g_pd3dCommandQueue);*/
+	/*PIXEndEvent_gpu(g_pd3dCommandQueue);*/
 
 	/*switch (wait_result)*/
 	/*{*/
-	/*case WAIT_OBJECT_0:*/
-	/*cPIXNotifyWakeFromFenceSignal( g_fenceEvent);  // The event was successfully signaled, so notify PIX*/
-			    /*break;*/
-			    /*}*/
+		/*case WAIT_OBJECT_0:*/
+		/*PIXNotifyWakeFromFenceSignal( g_fenceEvent);  // The event was successfully signaled, so notify PIX*/
+		/*break;*/
+        /*}*/
+	g_fence->lpVtbl->SetEventOnCompletion(g_fence, fenceValue, g_fenceEvent);
 }
 
 struct FrameContext* WaitForNextFrameResources()
 {
-	// Make the CPU wait until the adapter finished presenting the new frame.(g_hSwapChainWaitableObject)
-	// Make the CPU wait until the GPU has reached the fence value for the next frame. (g_fenceEvent)
 	UINT nextFrameIndex = g_frameIndex + 1;
 	g_frameIndex = nextFrameIndex;
 
@@ -1189,23 +904,15 @@ struct FrameContext* WaitForNextFrameResources()
 		waitableObjects[1] = g_fenceEvent;
 		numWaitableObjects = 2;
 	}
+	WaitForMultipleObjects(numWaitableObjects, waitableObjects, TRUE, INFINITE);
 
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(100, 100, 100), "WaitForNextFrameResources");*/
-	DWORD wait_result = WaitForMultipleObjects(numWaitableObjects, waitableObjects, TRUE, INFINITE);
-	/*cPIXEndEvent_gpu(g_pd3dCommandQueue);*/
-	/*switch (wait_result)*/
-	/*{*/
-	/*case WAIT_OBJECT_0:*/
-	/*cPIXNotifyWakeFromFenceSignal( g_fenceEvent);  // The event was successfully signaled, so notify PIX*/
-			    /*break;*/
-	/*}*/
 	return frameCtxt;
 }
 
 void create_query_objects(void)
 {
-	SUCCEEDED(g_pd3dDevice->lpVtbl->CreateQueryHeap(
-	    g_pd3dDevice,
+	SUCCEEDED(g_device->lpVtbl->CreateQueryHeap(
+	    g_device,
 	    &(D3D12_QUERY_HEAP_DESC){.Count = total_timer_count,
 				     .NodeMask = 1,
 				     .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP},
@@ -1214,8 +921,8 @@ void create_query_objects(void)
 
 	query_heap->lpVtbl->SetName(query_heap, L"timestamp_query_heap");
 
-	SUCCEEDED( g_pd3dDevice->lpVtbl->CreateCommittedResource(
-	    g_pd3dDevice,
+	SUCCEEDED( g_device->lpVtbl->CreateCommittedResource(
+	    g_device,
 	    &(D3D12_HEAP_PROPERTIES){.CreationNodeMask = 1,
 				     .Type = D3D12_HEAP_TYPE_READBACK,
 				     .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
@@ -1300,9 +1007,20 @@ __declspec(dllexport) void CleanupDeviceD3D()
 	csafe_release(rb_buffer);
 	csafe_release(query_heap);
 
-	/*csafe_release(g_pd3dDevice);*/
-	/*ULONG refcount = g_pd3dDevice->lpVtbl->Release(g_pd3dDevice);*/
+	csafe_release(g_pso);
+	csafe_release(g_rootsig);
+	csafe_release(dsv_resource);
+	csafe_release(vs_blob);
+	csafe_release(ps_blob);
+	csafe_release(triangle.vertex_default_resource);
+	csafe_release(triangle.vertex_upload_resource);
 
+	for(int i = 0; i < _countof(g_mainRenderTargetResource); ++i)
+	{
+		csafe_release(g_mainRenderTargetResource[i]);
+	}
+
+	csafe_release(g_device);
 #ifdef DX12_ENABLE_DEBUG_LAYER
 	IDXGIDebug1* pDebug = NULL;
 	if (SUCCEEDED(DXGIGetDebugInterface1(0, &IID_IDXGIDebug1, (void**)&pDebug))) {
@@ -1314,11 +1032,10 @@ __declspec(dllexport) void CleanupDeviceD3D()
 bool tester = true;
 __declspec(dllexport) bool update_and_render()
 {
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(250, 0, 0), "update_and_render");*/
 
-	/*ImGui_ImplDX12_NewFrame();*/
-	/*ImGui_ImplWin32_NewFrame();*/
-	/*igNewFrame();*/
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	igNewFrame();
 
 	bool show_demo_window = true;
 	bool show_another_window = false;
@@ -1328,63 +1045,29 @@ __declspec(dllexport) bool update_and_render()
 	clear_color.z = 1.0f;
 	clear_color.w = 0.0f;
 
-	/*if (show_demo_window) igShowDemoWindow(&show_demo_window);*/
+	if (show_demo_window) igShowDemoWindow(&show_demo_window);
 
-	/*{*/
-		/*ImGuiContext* imguictx = igGetCurrentContext();*/
-		/*igSetCurrentContext(imguictx);*/
+	{
+		ImGuiContext* imguictx = igGetCurrentContext();
+		igSetCurrentContext(imguictx);
 
-		/*igCheckbox("Demo Window", &show_demo_window);*/
-		/*igCheckbox("VSync", &is_vsync);*/
-		/*igColorEdit3("clear color", (float*)&clear_color, 0);*/
+		igCheckbox("Demo Window", &show_demo_window);
+		igCheckbox("VSync", &is_vsync);
+		igColorEdit3("clear color", (float*)&clear_color, 0);
 
-		/*igText("imgui gpu time %.4f ms/frame",*/
-		       /*frame_time);*/
+		igText("imgui gpu time %.4f ms/frame",
+		       frame_time);
 
-		/*igText("elapsed time %.4f ms/frame",*/
-		       /*delta_time.elapsed_ms);*/
+		igText("elapsed time %.4f ms/frame",
+		       delta_time.elapsed_ms);
 
-		/*igText("average delta %.4f ms/frame",*/
-		       /*delta_time_avg);*/
+		igText("average delta %.4f ms/frame",
+		       delta_time_avg);
 
-		/*igText("Application average %.4f ms/frame (%.1f FPS)",*/
-		       /*(double)(1000.0f / igGetIO()->Framerate),*/
-		       /*(double)igGetIO()->Framerate);*/
-
-		/*if (igBeginTabBar("core_info_tabbar", 0))*/
-		/*{*/
-			/*for(int i = 0; i < _countof(core_infos); ++i)*/
-			/*{*/
-				/*char tabtitle[7] = "Core ";*/
-				/*tabtitle[5] = '0' + core_infos[i].core_id;*/
-
-				/*if (igBeginTabItem(tabtitle, false, 0))*/
-				/*{*/
-					/*igColumns(5, "core_info_columns",true);*/
-					/*igSeparator();*/
-					/*igText("Cache level"); igNextColumn();*/
-					/*igText("Cache type"); igNextColumn();*/
-					/*igText("Cache size"); igNextColumn();*/
-					/*igText("Cache line size"); igNextColumn();*/
-					/*igText("Cache associativity"); igNextColumn();*/
-					/*igSeparator();*/
-
-					/*for(int j = 0; j < _countof(core_infos[i].cache_infos); ++j)*/
-					/*{*/
-						/*igText("%d", core_infos[i].cache_infos[j].cache_rel.Level);igNextColumn();*/
-						/*igText("%s", get_cache_type_string(core_infos[i].cache_infos[j].cache_rel.Type));igNextColumn();*/
-						/*igText("%d", core_infos[i].cache_infos[j].cache_rel.CacheSize);igNextColumn();*/
-						/*igText("%d", core_infos[i].cache_infos[j].cache_rel.LineSize);igNextColumn();*/
-						/*igText("%d", core_infos[i].cache_infos[j].cache_rel.Associativity);igNextColumn();*/
-					/*}*/
-					/*igColumns(1,"",true);*/
-					/*igSeparator();*/
-					/*igEndTabItem();*/
-				/*}*/
-			/*}*/
-			/*igEndTabBar();*/
-		/*}*/
-	/*}*/
+		igText("Application average %.4f ms/frame (%.1f FPS)",
+		       (double)(1000.0f / igGetIO()->Framerate),
+		       (double)igGetIO()->Framerate);
+	}
 
 	struct FrameContext* frameCtxt = WaitForNextFrameResources();
 
@@ -1394,7 +1077,7 @@ __declspec(dllexport) bool update_and_render()
 
 	if(tester)
 	{
-		create_aos_cube(g_pd3dCommandList);
+		create_triangle(g_pd3dCommandList);
 		tester = false;
 	}
 
@@ -1412,12 +1095,11 @@ __declspec(dllexport) bool update_and_render()
 								    .MaxDepth = 1.0f,
 								    .MinDepth = 0.0f});
 
-	//render aos cube
+	//render triangle
 	g_pd3dCommandList->lpVtbl->IASetPrimitiveTopology(g_pd3dCommandList, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_pd3dCommandList->lpVtbl->SetGraphicsRootSignature(g_pd3dCommandList, g_rootsig);
 	g_pd3dCommandList->lpVtbl->SetPipelineState(g_pd3dCommandList, g_pso);
-	g_pd3dCommandList->lpVtbl->IASetVertexBuffers(g_pd3dCommandList, 0, 1, &aos_cube.vbv);
-	g_pd3dCommandList->lpVtbl->IASetIndexBuffer(g_pd3dCommandList, &aos_cube.ibv);
+	g_pd3dCommandList->lpVtbl->IASetVertexBuffers(g_pd3dCommandList, 0, 1, &triangle.vbv);
 
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1453,15 +1135,9 @@ __declspec(dllexport) bool update_and_render()
 					    D3D12_QUERY_TYPE_TIMESTAMP,
 					    buffer_start);
 
+	igRender();  // render ui
 
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(0, 0, 255), "igRender");*/
-
-	/*igRender();  // render ui*/
-
-	/*cPIXEndEvent_gpu(g_pd3dCommandQueue);*/
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(255, 0, 255), "RenderDrawData");*/
-	/*ImGui_ImplDX12_RenderDrawData(igGetDrawData(), g_pd3dCommandList);*/
-	/*cPIXEndEvent_gpu(g_pd3dCommandQueue);*/
+	ImGui_ImplDX12_RenderDrawData(igGetDrawData(), g_pd3dCommandList);
 
 	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -1486,19 +1162,17 @@ __declspec(dllexport) bool update_and_render()
 	    1,
 	    (ID3D12CommandList* const*)&g_pd3dCommandList);
 
-	HRESULT hr4 = rb_buffer->lpVtbl->Map(rb_buffer,
+	HRESULT hr = rb_buffer->lpVtbl->Map(rb_buffer,
 					     0,
 					     &(D3D12_RANGE){.Begin = buffer_start * sizeof(UINT64),
 							    .End = buffer_end * sizeof(UINT64)},
 					     (void**)&timestamp_buffer);
-
+	ASSERT(SUCCEEDED(hr));
 	UINT64 time_delta = timestamp_buffer[buffer_end] - timestamp_buffer[buffer_start];
 	frame_time = ((double)time_delta / g_gpu_frequency) * 1000.0;
 
 	rb_buffer->lpVtbl->Unmap(rb_buffer, 0, &(D3D12_RANGE){.Begin = 0, .End = 0});
 	timestamp_buffer = NULL;
-
-	/*cPIXBeginEvent_gpu(g_pd3dCommandQueue, cPIX_COLOR(255, 255, 0), "Present");*/
 
 	UINT sync_interval = is_vsync ? 1 : 0;
 	UINT present_flags = is_vsync ? 0 : DXGI_PRESENT_ALLOW_TEARING;
@@ -1526,7 +1200,6 @@ __declspec(dllexport) bool update_and_render()
 	delta_times[stats_counter++] = delta_time.elapsed_ms;
 	if(stats_counter == BUFFERED_FRAME_STATS) stats_counter = 0;
 
-	/*cPIXEndEvent_gpu(g_pd3dCommandQueue);*/
 	return true;
 }
 
@@ -1534,6 +1207,7 @@ __declspec(dllexport) void resize(HWND hWnd, int width, int height)
 {
 	ImGui_ImplDX12_InvalidateDeviceObjects();
 	CleanupRenderTarget();
+	csafe_release(dsv_resource);
 
 	ResizeSwapChain(hWnd, width, height);
 	create_dsv(width,height);

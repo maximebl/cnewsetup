@@ -1,8 +1,6 @@
-/*#include <Windows.h>*/
-/*#include <stdbool.h>*/
-/*#include <stdint.h>*/
-/*#include <tchar.h>*/
+#include "cnewsetup.h"
 #pragma comment(lib,"user32")
+#pragma comment(lib, "Pathcch.lib")
 
 typedef bool(*gamecode_initialize)(HWND* hwnd);
 typedef void(*gamecode_resize)(HWND hWnd, int width, int height);
@@ -45,9 +43,9 @@ int main(){
 	if (!load_gamecode())
 		return 1;
 
-	WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L,win32code , NULL, NULL, NULL, NULL, _T("ImGui Example"), NULL };
+	WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L,win32code , NULL, NULL, NULL, NULL, _T("Clang C99 DirectX12"), NULL };
 	RegisterClassEx(&wc);
-	hwnd = CreateWindow(wc.lpszClassName, _T("Dear ImGui DirectX12 Example"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, NULL, NULL, wc.hInstance, NULL);
+	hwnd = CreateWindow(wc.lpszClassName, _T("Clang C99 DirectX12"), WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, NULL, NULL, wc.hInstance, NULL);
 
 	ShowWindow(hwnd, SW_SHOWDEFAULT);
 	UpdateWindow(hwnd);
@@ -78,19 +76,7 @@ int main(){
 			game_is_ready = true;
 		}
 
-		/*measurement measure_updateandrender = measurement_default;*/
-		/*QueryPerformanceCounter(&measure_updateandrender.start_time);*/
 		game_is_ready = gamecode.update_and_render();
-		/*QueryPerformanceCounter(&measure_updateandrender.end_time);*/
-		/*measure_updateandrender.elapsed_ms.QuadPart = measure_updateandrender.end_time.QuadPart - measure_updateandrender.start_time.QuadPart;*/
-		/*measure_updateandrender.elapsed_ms.QuadPart *= 1000000;*/
-		/*measure_updateandrender.elapsed_ms.QuadPart /= g_cpu_frequency.QuadPart;*/
-
-		/*char cpu_measurement_txtbuf[15];*/
-		/*_itoa_s(measure_updateandrender.elapsed_ms.QuadPart,&cpu_measurement_txtbuf, 15, 10);*/
-		/*SetWindowTextA(hwnd, cpu_measurement_txtbuf);*/
-		/*if (!gamecode.update_and_render())*/
-			/*game_is_ready = false;*/
 	}
 	gamecode.cleanup();
 	if (gamecode.game_dll)
@@ -171,20 +157,15 @@ void get_dll_path()
 { 
 	DWORD l_win32exe = GetModuleFileNameW(NULL, win32_exe_location, MAX_PATH);
 
-	for (size_t i = l_win32exe; i != 0; --i)
-	{
-		if (win32_exe_location[i] == '\\')
-		{
-			win32_exe_location[i] = '\0';
-			break;
-		}
-	}
+	PathCchRemoveFileSpec(win32_exe_location, l_win32exe);
 
 	lstrcpyW(gamecodedll_path, win32_exe_location);
 	lstrcatW(gamecodedll_path, gamecodedll_name);
 
 	lstrcpyW(tempgamecodedll_path, win32_exe_location);
 	lstrcatW(tempgamecodedll_path, temp_gamecodedll_name);
+
+	SetCurrentDirectoryW(win32_exe_location);
 }
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)

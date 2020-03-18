@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <float.h>
 
+#include "PathCch.h"
 #include <d3dcompiler.h>
 #include <dxgiformat.h>
 #include <dxgi1_4.h>
