@@ -1,13 +1,13 @@
 $projname = "cnewsetup"
 $output_path = "$PSScriptRoot\bin\debug"
 Push-Location "$output_path"
-       
-#pch
-$pch_source = (Get-Item "$PSScriptRoot\source\cnewsetup.h" -ErrorAction SilentlyContinue) 
-$pch = (Get-Item "$output_path\cnewsetup.h.pch" -ErrorAction SilentlyContinue)
 
 $compiler = "$PSScriptRoot\bin\compiler\clang.exe"
 $linker = "$PSScriptRoot\bin\compiler\lld-link.exe"
+
+#pch
+$pch_source = (Get-Item "$PSScriptRoot\source\cnewsetup.h" -ErrorAction SilentlyContinue) 
+$pch = (Get-Item "$output_path\cnewsetup.h.pch" -ErrorAction SilentlyContinue)
 
 if($pch_source.LastWriteTime -gt $pch.LastWriteTime)
 {

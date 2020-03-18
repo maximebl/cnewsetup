@@ -24,11 +24,7 @@
 //  2018-06-08: DirectX12: Use draw_data->DisplayPos and draw_data->DisplaySize to setup projection matrix and clipping rectangle (to ease support for future multi-viewport).
 //  2018-02-22: Merged into master with all Win32 code synchronized to other examples.
 
-/*#include "d3d12.h"*/
-/*#include <d3dcompiler.h>*/
-/*#pragma clang diagnostic ignored "-Weverything"*/
-/*#include "cimgui/cimgui.h"*/
-/*#pragma clang diagnostic pop*/
+#include "cimgui.h"
 
 #include <d3d12.h>
 #pragma clang diagnostic ignored "-Weverything"

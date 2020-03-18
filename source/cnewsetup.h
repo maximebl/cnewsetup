@@ -15,6 +15,6 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
-#include "cimgui/cimgui.h"
+#include "cimgui.h"
 #pragma clang diagnostic pop
 
