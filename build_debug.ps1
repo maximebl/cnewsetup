@@ -1,9 +1,16 @@
 $projname = "cnewsetup"
 $output_path = "$PSScriptRoot\bin\debug"
+
+if(!(Test-Path $output_path))
+{
+    new-item $output_path -ItemType "directory"
+}
+
 Push-Location "$output_path"
 
 $compiler = "$PSScriptRoot\bin\compiler\clang.exe"
 $linker = "$PSScriptRoot\bin\compiler\lld-link.exe"
+
 
 #pch
 $pch_source = (Get-Item "$PSScriptRoot\source\cnewsetup.h" -ErrorAction SilentlyContinue) 
@@ -17,7 +24,6 @@ if($pch_source.LastWriteTime -gt $pch.LastWriteTime)
     -D "CINTERFACE" `
     -o "$output_path\cnewsetup.h.pch"
 }
-
 
 # game_code
 $gamecode_source_path = "$PSScriptRoot\source"
