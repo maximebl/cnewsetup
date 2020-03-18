@@ -13,4 +13,3 @@ Directx12 template project using Clang and C99
 # Disclaimers
 * Make sure you're in developer mode before running `build_debug.ps1`.
 * You need to have the Windows SDK installed but you don't need visual studio.
-* I'm not sure what's the best way to handle all the windows dependencies without requiring the user of this project to have visual studio installed. So I put all the dependencies in `cnewstup\bin\dependencies`.
