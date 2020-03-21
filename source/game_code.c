@@ -198,22 +198,22 @@ __declspec(dllexport) bool initialize(HWND* hwnd)
 
 	fixed_GetCPUDescriptorHandleForHeapStart fixed_gchfhs =
 	    (fixed_GetCPUDescriptorHandleForHeapStart)
-		g_pd3dRtvDescHeap->lpVtbl->GetCPUDescriptorHandleForHeapStart;
+		g_pd3dSrvDescHeap->lpVtbl->GetCPUDescriptorHandleForHeapStart;
 	fixed_GetGPUDescriptorHandleForHeapStart fixed_gghfhs =
 	    (fixed_GetGPUDescriptorHandleForHeapStart)
 		g_pd3dSrvDescHeap->lpVtbl->GetGPUDescriptorHandleForHeapStart;
 
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvhandle;
-	D3D12_GPU_DESCRIPTOR_HANDLE srvhandle;
-	fixed_gchfhs(g_pd3dSrvDescHeap, &rtvhandle);
-	fixed_gghfhs(g_pd3dSrvDescHeap, &srvhandle);
+	D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu_handle;
+	D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu_handle;
+	fixed_gchfhs(g_pd3dSrvDescHeap, &srv_cpu_handle);
+	fixed_gghfhs(g_pd3dSrvDescHeap, &srv_gpu_handle);
 
 	ImGui_ImplDX12_Init(g_device,
 			    NUM_FRAMES_IN_FLIGHT,
 			    DXGI_FORMAT_R8G8B8A8_UNORM,
 			    g_pd3dSrvDescHeap,
-			    rtvhandle,
-			    srvhandle);
+			    srv_cpu_handle,
+			    srv_gpu_handle);
 
 	LARGE_INTEGER tmp_gpu_frequency;
 	g_pd3dCommandQueue->lpVtbl->GetTimestampFrequency(g_pd3dCommandQueue, &tmp_gpu_frequency);
