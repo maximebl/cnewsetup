@@ -223,7 +223,6 @@ __declspec(dllexport) bool initialize(HWND* hwnd)
 	QueryPerformanceFrequency(&tmp_cpu_frequency);
 	g_cpu_frequency = (double)tmp_cpu_frequency.QuadPart;
 	delta_time = measurement_default;
-
 	SetTimer(*hwnd, IDT_TIMER1, 5000 ,NULL);
 	return true;
 }
@@ -1029,7 +1028,10 @@ __declspec(dllexport) void CleanupDeviceD3D()
 	}
 #endif
 }
-bool tester = true;
+
+bool should_render_triangle = false;
+bool is_triangle_created = false;
+
 __declspec(dllexport) bool update_and_render()
 {
 
@@ -1075,12 +1077,6 @@ __declspec(dllexport) bool update_and_render()
 	frameCtxt->CommandAllocator->lpVtbl->Reset(frameCtxt->CommandAllocator);
 	g_pd3dCommandList->lpVtbl->Reset(g_pd3dCommandList, frameCtxt->CommandAllocator, NULL);
 
-	if(tester)
-	{
-		create_triangle(g_pd3dCommandList);
-		tester = false;
-	}
-
 	g_pd3dCommandList->lpVtbl->RSSetScissorRects(
 	    g_pd3dCommandList,
 	    1,
@@ -1095,11 +1091,6 @@ __declspec(dllexport) bool update_and_render()
 								    .MaxDepth = 1.0f,
 								    .MinDepth = 0.0f});
 
-	//render triangle
-	g_pd3dCommandList->lpVtbl->IASetPrimitiveTopology(g_pd3dCommandList, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	g_pd3dCommandList->lpVtbl->SetGraphicsRootSignature(g_pd3dCommandList, g_rootsig);
-	g_pd3dCommandList->lpVtbl->SetPipelineState(g_pd3dCommandList, g_pso);
-	g_pd3dCommandList->lpVtbl->IASetVertexBuffers(g_pd3dCommandList, 0, 1, &triangle.vbv);
 
 	D3D12_RESOURCE_BARRIER barrier;
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1110,6 +1101,7 @@ __declspec(dllexport) bool update_and_render()
 	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
 	g_pd3dCommandList->lpVtbl->ResourceBarrier(g_pd3dCommandList, 1, &barrier);
+
 	g_pd3dCommandList->lpVtbl->ClearDepthStencilView(g_pd3dCommandList, get_dsv_cpuhandle(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.f, 0,0, NULL);
 	g_pd3dCommandList->lpVtbl->ClearRenderTargetView(
 	    g_pd3dCommandList,
@@ -1125,7 +1117,22 @@ __declspec(dllexport) bool update_and_render()
 						      FALSE, 
 						      &dsv_handle);
 	g_pd3dCommandList->lpVtbl->SetDescriptorHeaps(g_pd3dCommandList, 1, &g_pd3dSrvDescHeap);
-	g_pd3dCommandList->lpVtbl->DrawInstanced(g_pd3dCommandList, 3, 1, 0, 0);
+
+	//render triangle
+	if(should_render_triangle)
+	{
+		if(!is_triangle_created)
+		{
+			is_triangle_created = true;
+			create_triangle(g_pd3dCommandList);
+		}
+
+		g_pd3dCommandList->lpVtbl->IASetPrimitiveTopology(g_pd3dCommandList, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_pd3dCommandList->lpVtbl->SetGraphicsRootSignature(g_pd3dCommandList, g_rootsig);
+		g_pd3dCommandList->lpVtbl->SetPipelineState(g_pd3dCommandList, g_pso);
+		g_pd3dCommandList->lpVtbl->IASetVertexBuffers(g_pd3dCommandList, 0, 1, &triangle.vbv);
+		g_pd3dCommandList->lpVtbl->DrawInstanced(g_pd3dCommandList, 3, 1, 0, 0);
+	}
 
 	UINT buffer_start = backBufferIdx * 2;
 	UINT buffer_end = (backBufferIdx * 2 + 1);

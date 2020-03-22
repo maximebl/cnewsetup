@@ -19,7 +19,7 @@ $pch = (Get-Item "$output_path\cnewsetup.h.pch" -ErrorAction SilentlyContinue)
 if($pch_source.LastWriteTime -gt $pch.LastWriteTime)
 {
     Write-Host $pch_source.Name "was modified, recompiling cnewsetup.h.pch" -ForegroundColor Yellow
-    &$compiler -g -x c-header "$PSScriptRoot\source\cnewsetup.h" `
+    &$compiler -gfull -x c-header "$PSScriptRoot\source\cnewsetup.h" `
     -D "CIMGUI_DEFINE_ENUMS_AND_STRUCTS" `
     -D "CINTERFACE" `
     -o "$output_path\cnewsetup.h.pch"
@@ -51,7 +51,7 @@ foreach($file in $gamecode_source_files)
     }
             
     $pre_compilation = (Get-Date)
-    &$compiler -std=c11 -g -c -Weverything -include "$PSScriptRoot\source\cnewsetup.h" `
+    &$compiler -std=c11 -gfull -c -Weverything -include "$PSScriptRoot\source\cnewsetup.h" `
     -D "CIMGUI_DEFINE_ENUMS_AND_STRUCTS" `
     -D "CINTERFACE" `
     "$PSScriptRoot\source\game_code.c" `
@@ -80,7 +80,7 @@ foreach($file in $gamecode_source_files)
 
 # executable
 Write-Host "Compiling $projname.exe" -ForegroundColor Blue
-&$compiler -std=c11 -g -c -Weverything -include "$PSScriptRoot\source\cnewsetup.h" `
+&$compiler -std=c11 -gfull -c -Weverything -include "$PSScriptRoot\source\cnewsetup.h" `
 -D "CIMGUI_DEFINE_ENUMS_AND_STRUCTS" `
 -D "CINTERFACE" `
 "$PSScriptRoot\source\main.c"

@@ -172,8 +172,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	if (game_is_ready)
 	{
-		if (gamecode.wndproc(hWnd, msg, wParam, lParam))
-			return 1;
+		gamecode.wndproc(hWnd, msg, wParam, lParam);
 	}
 
 	switch (msg)
